@@ -1,0 +1,5 @@
+resolver: lts-16.22
+
+nix:
+  pure: false
+  packages: [zlib]
