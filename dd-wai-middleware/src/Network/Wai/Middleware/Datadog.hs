@@ -1,6 +1,7 @@
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE FlexibleContexts  #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE RecordWildCards   #-}
+
 module Network.Wai.Middleware.Datadog
     ( datadogMiddleware
     -- , rtsStatReporter
@@ -10,29 +11,33 @@ module Network.Wai.Middleware.Datadog
     , traceGenerator
     , getTraceState
     ) where
-import Control.Concurrent
-import Control.Lens ((&), (.~))
-import Control.Monad
-import Data.Int
-import Data.IORef
-import Data.Text (Text)
-import qualified Data.Text as T
-import qualified Data.Text.Encoding as T
-import qualified Data.HashMap.Strict as HM
-import Data.IP
-import Data.Vault.Lazy
-import GHC.Stats
-import Network.Datadog.APM
-import Network.HTTP.Types.Status
-import Network.Socket (SockAddr(..), inet_ntoa)
-import Network.StatsD.Datadog
-import Network.Wai
-import Network.Wai.Internal
-import System.Clock
-import System.IO.Unsafe
-import System.Posix.Process
-import System.Posix.Types (ProcessID)
-import System.Random.MWC
+import           Control.Concurrent
+import           Control.Lens              ((&), (.~))
+import           Control.Monad
+import           Data.ByteString.Builder   (toLazyByteString)
+import           Data.ByteString.Lazy      (ByteString, toStrict)
+import qualified Data.HashMap.Strict       as HM
+import           Data.Int
+import           Data.IORef
+import           Data.IORef                (modifyIORef', newIORef, readIORef)
+import           Data.IP
+import           Data.Monoid               ((<>))
+import           Data.Text                 (Text)
+import qualified Data.Text                 as T
+import qualified Data.Text.Encoding        as T
+import           Data.Vault.Lazy
+import           GHC.Stats
+import           Network.Datadog.APM
+import           Network.HTTP.Types.Status
+import           Network.Socket            (SockAddr (..))
+import           Network.StatsD.Datadog
+import           Network.Wai
+import           Network.Wai.Internal
+import           System.Clock
+import           System.IO.Unsafe
+import           System.Posix.Process
+import           System.Posix.Types        (ProcessID)
+import           System.Random.MWC
 
 traceGenerator :: GenIO
 traceGenerator = unsafePerformIO createSystemRandom
@@ -123,10 +128,12 @@ apmMiddleware client ctxt app req respond = do
   mt <- createMutableTrace tid traceGenerator >>= \st -> createMutableTraceSpan st ctxt
   let st = case mt of
              Network.Datadog.APM.Dummy -> error "Should be impossible"
-             (MTrace st) -> st
+             (MTrace st)               -> st
   let req' = req { vault = insert traceStateKey st $ vault req }
   app req' $ \resp -> do
     let traceFinisher status respHeaders = do
+          rbody <- getRequestBodyChunk req
+          respbody <- grabResponseBody resp
           let code = statusCode status
               otherMeta = HM.fromList
                 [ ("system.pid", T.pack $ show unsafeProcessId)
@@ -152,9 +159,18 @@ apmMiddleware client ctxt app req respond = do
                 , ("http.status_code", T.pack $ show $ statusCode status)
                 , ("http.url", T.decodeUtf8 $ rawPathInfo req)
                 ]
+              httpBodyMeta =
+                if code == 500
+                  then
+                  HM.fromList
+                    [ ("http.requestBody", T.decodeUtf8 rbody)
+                    , ("http.responseBody", T.decodeUtf8 (toStrict respbody))
+                    ]
+                  else
+                    HM.fromList []
 
           when (code >= 500 && code < 599) $ markTraceAsError mt
-          tagTrace mt (httpMeta `HM.union` netMeta `HM.union` otherMeta)
+          tagTrace mt (httpMeta `HM.union` netMeta `HM.union` otherMeta `HM.union` httpBodyMeta)
           mt' <- completeMutableTraceSpan mt
           t <- completeMutableTrace mt'
           sendTrace client t
@@ -168,6 +184,14 @@ apmMiddleware client ctxt app req respond = do
       ResponseBuilder status respHeaders _ -> traceFinisher status respHeaders
       ResponseStream status respHeaders _ -> traceFinisher status respHeaders
     return r
+
+grabResponseBody :: Response -> IO ByteString
+grabResponseBody res =
+  let (status,headers,body) = responseToStream res in
+  body $ \f -> do
+    content <- newIORef mempty
+    f (\chunk -> modifyIORef' content (<> chunk)) (return ())
+    toLazyByteString <$> readIORef content
 
 datadogMiddleware :: [Tag] -> StatsClient -> Middleware
 datadogMiddleware defaultTags client app req responder = do
@@ -185,5 +209,5 @@ datadogMiddleware defaultTags client app req responder = do
           send client (metric responseTime Timer millis & tags .~ ts)
     case resp of
       ResponseRaw{} -> return ()
-      _ -> traceFinisher
+      _             -> traceFinisher
     return r
