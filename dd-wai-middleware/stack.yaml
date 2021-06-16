@@ -1,0 +1,6 @@
+resolver: lts-17.15
+
+nix:
+  path: ["nixpkgs=https://github.com/NixOS/nixpkgs/tarball/fa0326ce5233f7d592271df52c9d0812bec47b84"]
+  pure: false
+  packages: [zlib]

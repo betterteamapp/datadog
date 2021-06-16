@@ -151,9 +151,6 @@ apmMiddleware client ctxt app req respond = do
                 SockAddrUnix str ->
                   [ ("out.socket", T.pack str)
                   ]
-                SockAddrCan p ->
-                  [ ("out.can", T.pack $ show p)
-                  ]
               httpMeta = HM.fromList
                 [ ("http.method", T.decodeUtf8 $ requestMethod req)
                 , ("http.status_code", T.pack $ show $ statusCode status)
